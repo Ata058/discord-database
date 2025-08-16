@@ -1,6 +1,13 @@
 // index.js
 require('dotenv').config();
-const { Client, GatewayIntentBits, Partials } = require('discord.js');
+const { 
+  Client, 
+  GatewayIntentBits, 
+  Partials, 
+  SlashCommandBuilder, 
+  PermissionFlagsBits, 
+  EmbedBuilder 
+} = require('discord.js');
 
 const client = new Client({
   intents: [
@@ -12,8 +19,26 @@ const client = new Client({
   partials: [Partials.Channel],
 });
 
-client.once('ready', () => {
+client.once('ready', async () => {
   console.log(`✅ Eingeloggt als ${client.user.tag}`);
+
+  // Slash Command für Ban registrieren
+  const banIdCmd = new SlashCommandBuilder()
+    .setName('banid')
+    .setDescription('Banne einen User per Discord-ID mit Grund')
+    .addStringOption(opt =>
+      opt.setName('userid')
+         .setDescription('Die Discord-ID des Users')
+         .setRequired(true))
+    .addStringOption(opt =>
+      opt.setName('grund')
+         .setDescription('Der Grund für den Bann')
+         .setRequired(true))
+    .setDefaultMemberPermissions(PermissionFlagsBits.BanMembers);
+
+  // Befehl global registrieren (kann bis zu 1h dauern)
+  await client.application.commands.set([banIdCmd]);
+  console.log('✅ Slash-Command /banid registriert');
 });
 
 /* ---------- Auto-Role beim Join ---------- */
@@ -40,12 +65,40 @@ client.on('guildMemberAdd', async (member) => {
 
 /* ---------- Message-Listener: !pp ---------- */
 client.on('messageCreate', (message) => {
-  // Bots ignorieren
   if (message.author.bot) return;
 
-  // exakt !pp (case-insensitive)
   if (message.content.trim().toLowerCase() === '!pp') {
     message.reply('💳 our PayPal-Adress: **fliegerselling@gmail.com**');
+  }
+});
+
+/* ---------- Slash-Command Handler ---------- */
+client.on('interactionCreate', async (interaction) => {
+  if (!interaction.isChatInputCommand()) return;
+
+  if (interaction.commandName === 'banid') {
+    const userId = interaction.options.getString('userid');
+    const grund = interaction.options.getString('grund');
+
+    try {
+      await interaction.guild.members.ban(userId, { reason: grund });
+
+      // Embed im Channel posten
+      const embed = new EmbedBuilder()
+        .setTitle('🚫 Benutzer gebannt')
+        .addFields(
+          { name: 'User-ID', value: userId, inline: true },
+          { name: 'Grund', value: grund, inline: true }
+        )
+        .setColor('Red')
+        .setTimestamp();
+
+      await interaction.reply({ embeds: [embed] });
+      console.log(`✅ User ${userId} gebannt mit Grund: ${grund}`);
+    } catch (err) {
+      console.error('❌ Fehler beim Bannen:', err.message);
+      await interaction.reply({ content: `❌ Fehler: ${err.message}`, ephemeral: true });
+    }
   }
 });
 
