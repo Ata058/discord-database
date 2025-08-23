@@ -37,7 +37,7 @@ const logChannels = {
   ban: null,
   timeout: null,
   nickname: null,
-  claim: null,            // <— NEU: Claim-Logs
+  claim: null,
 };
 
 /* ---------------- Slash-Commands definieren ---------------- */
@@ -67,7 +67,7 @@ const setLogsCmd = new SlashCommandBuilder()
         { name: 'ban', value: 'ban' },
         { name: 'timeout', value: 'timeout' },
         { name: 'nickname', value: 'nickname' },
-        { name: 'claim', value: 'claim' },             // <— NEU
+        { name: 'claim', value: 'claim' },
       )
   )
   .addChannelOption(opt =>
@@ -77,7 +77,7 @@ const setLogsCmd = new SlashCommandBuilder()
   )
   .setDefaultMemberPermissions(PermissionFlagsBits.Administrator);
 
-/* NEW: /claim – nur für Admins */
+/* /claim – nur für Admins */
 const claimCmd = new SlashCommandBuilder()
   .setName('claim')
   .setDescription('Hole einen Account und erhalte ihn per DM')
@@ -91,16 +91,47 @@ const claimCmd = new SlashCommandBuilder()
         { name: 'discord', value: 'discord' },
       )
   )
-  .setDefaultMemberPermissions(PermissionFlagsBits.Administrator); // nur Admins
+  .setDefaultMemberPermissions(PermissionFlagsBits.Administrator);
+
+/* NEW: /setstock – legt den Bestandskanal fest und erstellt/merkt die Nachricht */
+const setStockCmd = new SlashCommandBuilder()
+  .setName('setstock')
+  .setDescription('Setzt den Kanal für das Bestands-Board (wird als eine Nachricht gehalten)')
+  .addChannelOption(opt =>
+    opt.setName('channel')
+      .setDescription('Kanal für das Bestands-Board')
+      .setRequired(true)
+  )
+  .setDefaultMemberPermissions(PermissionFlagsBits.Administrator);
+
+/* NEW: /restock – aktualisiert das Board & pingt @everyone */
+const restockCmd = new SlashCommandBuilder()
+  .setName('restock')
+  .setDescription('Aktualisiert das Bestands-Board und pingt @everyone')
+  .addStringOption(o =>
+    o.setName('service')
+     .setDescription('Welcher Service wurde restocked? (optional)')
+     .setRequired(false)
+     .addChoices(
+       { name: 'steam', value: 'steam' },
+       { name: 'fivem', value: 'fivem' },
+       { name: 'discord', value: 'discord' },
+     ))
+  .addStringOption(o =>
+    o.setName('note')
+     .setDescription('Zusätzliche Info (optional)')
+     .setRequired(false)
+  )
+  .setDefaultMemberPermissions(PermissionFlagsBits.Administrator);
 
 /* ---------- Ready ---------- */
 client.once('ready', async () => {
   console.log(`✅ Eingeloggt als ${client.user.tag}`);
   const rest = new REST({ version: '10' }).setToken(process.env.TOKEN);
   await rest.put(Routes.applicationCommands(client.application.id), {
-    body: [banIdCmd, setLogsCmd, claimCmd],
+    body: [banIdCmd, setLogsCmd, claimCmd, setStockCmd, restockCmd],
   });
-  console.log('✅ Slash-Commands /banid, /setlogs, /claim registriert');
+  console.log('✅ Slash-Commands registriert');
 });
 
 /* ---------- Auto-Role beim Join + Join-Log ---------- */
@@ -195,6 +226,82 @@ client.on('messageCreate', (message) => {
   }
 });
 
+/* ---------- Helpers: Stock ---------- */
+async function ensureStockTable() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS guild_stock_message (
+      guild_id    BIGINT PRIMARY KEY,
+      channel_id  BIGINT NOT NULL,
+      message_id  BIGINT NOT NULL
+    );
+  `);
+}
+
+async function getStockCounts() {
+  const services = ['steam','fivem','discord'];
+  const base = Object.fromEntries(services.map(s => [s, 0]));
+  const { rows } = await pool.query(
+    `SELECT service, COUNT(*)::int AS free
+       FROM accounts
+      WHERE is_used = false
+      GROUP BY service;`
+  );
+  for (const r of rows) if (base[r.service] !== undefined) base[r.service] = r.free;
+  base.total = services.reduce((a,s)=>a+base[s],0);
+  return base;
+}
+
+function buildStockEmbed(counts) {
+  return new EmbedBuilder()
+    .setTitle('📦 Bestand (freie Accounts)')
+    .setDescription('Live-Bestand aller Services')
+    .addFields(
+      { name: 'Steam', value: String(counts.steam ?? 0), inline: true },
+      { name: 'FiveM', value: String(counts.fivem ?? 0), inline: true },
+      { name: 'Discord', value: String(counts.discord ?? 0), inline: true },
+      { name: 'Gesamt', value: String(counts.total ?? 0), inline: true },
+    )
+    .setColor(0x5865F2)
+    .setTimestamp();
+}
+
+async function updateStockMessage(guild, { ping = false, pingText = '' } = {}) {
+  await ensureStockTable();
+
+  const { rows } = await pool.query(
+    'SELECT channel_id, message_id FROM guild_stock_message WHERE guild_id = $1',
+    [guild.id]
+  );
+  if (rows.length === 0) return; // nicht konfiguriert
+
+  const { channel_id, message_id } = rows[0];
+  const channel = await guild.channels.fetch(channel_id).catch(()=>null);
+  if (!channel?.isTextBased()) return;
+
+  const counts = await getStockCounts();
+  const embed = buildStockEmbed(counts);
+
+  // Versuche, vorhandene Nachricht zu editieren – wenn weg, neu erstellen
+  let msg = null;
+  try {
+    msg = await channel.messages.fetch(message_id);
+    await msg.edit({ embeds: [embed] });
+  } catch {
+    const newMsg = await channel.send({ embeds: [embed] });
+    await pool.query(
+      `INSERT INTO guild_stock_message (guild_id, channel_id, message_id)
+       VALUES ($1,$2,$3)
+       ON CONFLICT (guild_id) DO UPDATE SET channel_id = EXCLUDED.channel_id, message_id = EXCLUDED.message_id`,
+      [guild.id, channel.id, newMsg.id]
+    );
+  }
+
+  if (ping) {
+    const content = `@everyone ${pingText || 'Restock ist live!'}`;
+    await channel.send({ content, allowedMentions: { parse: ['everyone'] } }).catch(()=>{});
+  }
+}
+
 /* ---------- Interactions ---------- */
 client.on('interactionCreate', async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
@@ -235,9 +342,39 @@ client.on('interactionCreate', async (interaction) => {
     return interaction.reply({ content: `✅ **${typ}**-Logs werden nun in ${channel} gesendet.`, ephemeral: true });
   }
 
+  /* /setstock */
+  if (interaction.commandName === 'setstock') {
+    const channel = interaction.options.getChannel('channel');
+    if (!channel?.isTextBased()) {
+      return interaction.reply({ content: '❌ Bitte einen Text-Channel angeben.', ephemeral: true });
+    }
+    await ensureStockTable();
+    const counts = await getStockCounts();
+    const embed = buildStockEmbed(counts);
+
+    // Sende (oder ersetze) die Board-Nachricht und speichere IDs
+    const msg = await channel.send({ embeds: [embed] });
+    await pool.query(
+      `INSERT INTO guild_stock_message (guild_id, channel_id, message_id)
+       VALUES ($1,$2,$3)
+       ON CONFLICT (guild_id) DO UPDATE SET channel_id = EXCLUDED.channel_id, message_id = EXCLUDED.message_id`,
+      [interaction.guild.id, channel.id, msg.id]
+    );
+    return interaction.reply({ content: `✅ Bestands-Board gesetzt: ${channel}`, ephemeral: true });
+  }
+
+  /* /restock */
+  if (interaction.commandName === 'restock') {
+    const service = interaction.options.getString('service') || '';
+    const note = interaction.options.getString('note') || '';
+    const extra = [service && `**${service}**`, note && `— ${note}`].filter(Boolean).join(' ');
+    await updateStockMessage(interaction.guild, { ping: true, pingText: `Restock ist live! ${extra}` });
+    return interaction.reply({ content: '✅ Bestand aktualisiert & @everyone gepingt.', ephemeral: true });
+  }
+
   /* /claim */
   if (interaction.commandName === 'claim') {
-    // **Runtime-Schutz** (zusätzlich zur Command-Definition)
+    // Nur Admins
     if (!interaction.memberPermissions?.has(PermissionFlagsBits.Administrator)) {
       return interaction.reply({
         content: '🚫 Du brauchst **Administrator**-Rechte, um diesen Befehl zu verwenden.',
@@ -257,74 +394,4 @@ client.on('interactionCreate', async (interaction) => {
 
       // Nächster freier Account dieses Services (Zeile sperren)
       const sel = await pgClient.query(
-        `SELECT id, username, password, email, email_pass
-           FROM accounts
-          WHERE is_used = false AND service = $1
-          ORDER BY id ASC
-          LIMIT 1
-          FOR UPDATE SKIP LOCKED`,
-        [service]
-      );
-
-      if (sel.rows.length === 0) {
-        await pgClient.query('ROLLBACK');
-        return interaction.reply({ content: `❌ Keine verfügbaren **${service}**-Accounts.`, ephemeral: true });
-      }
-
-      const acc = sel.rows[0];
-
-      // Reservieren/markieren
-      await pgClient.query(
-        `UPDATE accounts
-            SET is_used = true,
-                claimed_by = $1,
-                claimed_at = NOW()
-          WHERE id = $2`,
-        [interaction.user.id, acc.id]
-      );
-
-      // DM senden
-      const embed = new EmbedBuilder()
-        .setTitle(`✅ Dein ${service}-Account`)
-        .addFields(
-          { name: 'Username', value: acc.username || '—', inline: true },
-          { name: 'Passwort', value: acc.password || '—', inline: true },
-          ...(acc.email ? [{ name: 'E-Mail', value: acc.email, inline: true }] : []),
-          ...(acc.email_pass ? [{ name: 'E-Mail-Passwort', value: acc.email_pass, inline: true }] : []),
-        )
-        .setColor(0x57F287)
-        .setTimestamp();
-
-      await interaction.user.send({ embeds: [embed] });
-
-      await pgClient.query('COMMIT');
-      await interaction.reply({ content: '📬 Ich habe dir den Account per DM geschickt.', ephemeral: true });
-
-      /* ---------- Claim-Log ---------- */
-      if (logChannels.claim) {
-        const logCh = interaction.guild.channels.cache.get(logChannels.claim);
-        if (logCh?.isTextBased()) {
-          const logEmbed = new EmbedBuilder()
-            .setTitle('📥 Account geclaimt')
-            .addFields(
-              { name: 'User', value: `${interaction.user.tag} (${interaction.user.id})` },
-              { name: 'Service', value: service, inline: true },
-              { name: 'Username', value: acc.username || '—', inline: true },
-              { name: 'Zeitpunkt', value: `<t:${Math.floor(Date.now()/1000)}:f>`, inline: true }
-            )
-            .setColor(0x2F3136)
-            .setTimestamp();
-          logCh.send({ embeds: [logEmbed] }).catch(()=>{});
-        }
-      }
-
-    } catch (err) {
-      try { await pgClient.query('ROLLBACK'); } catch {}
-      return interaction.reply({ content: `❌ Fehler beim Claim: ${err.message}`, ephemeral: true });
-    } finally {
-      pgClient.release();
-    }
-  }
-});
-
-client.login(process.env.TOKEN);
+        `SELECT id, username, password, email, email_p_
