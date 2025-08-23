@@ -37,6 +37,7 @@ const logChannels = {
   ban: null,
   timeout: null,
   nickname: null,
+  claim: null,            // <— NEU: Claim-Logs
 };
 
 /* ---------------- Slash-Commands definieren ---------------- */
@@ -66,6 +67,7 @@ const setLogsCmd = new SlashCommandBuilder()
         { name: 'ban', value: 'ban' },
         { name: 'timeout', value: 'timeout' },
         { name: 'nickname', value: 'nickname' },
+        { name: 'claim', value: 'claim' },             // <— NEU
       )
   )
   .addChannelOption(opt =>
@@ -75,7 +77,7 @@ const setLogsCmd = new SlashCommandBuilder()
   )
   .setDefaultMemberPermissions(PermissionFlagsBits.Administrator);
 
-/* NEW: /claim – jetzt nur für Admins */
+/* NEW: /claim – nur für Admins */
 const claimCmd = new SlashCommandBuilder()
   .setName('claim')
   .setDescription('Hole einen Account und erhalte ihn per DM')
@@ -89,7 +91,7 @@ const claimCmd = new SlashCommandBuilder()
         { name: 'discord', value: 'discord' },
       )
   )
-  .setDefaultMemberPermissions(PermissionFlagsBits.Administrator); // <— WICHTIG
+  .setDefaultMemberPermissions(PermissionFlagsBits.Administrator); // nur Admins
 
 /* ---------- Ready ---------- */
 client.once('ready', async () => {
@@ -235,7 +237,7 @@ client.on('interactionCreate', async (interaction) => {
 
   /* /claim */
   if (interaction.commandName === 'claim') {
-    // **Runtime-Schutz**: Nur Admins
+    // **Runtime-Schutz** (zusätzlich zur Command-Definition)
     if (!interaction.memberPermissions?.has(PermissionFlagsBits.Administrator)) {
       return interaction.reply({
         content: '🚫 Du brauchst **Administrator**-Rechte, um diesen Befehl zu verwenden.',
@@ -296,7 +298,25 @@ client.on('interactionCreate', async (interaction) => {
       await interaction.user.send({ embeds: [embed] });
 
       await pgClient.query('COMMIT');
-      return interaction.reply({ content: '📬 Ich habe dir den Account per DM geschickt.', ephemeral: true });
+      await interaction.reply({ content: '📬 Ich habe dir den Account per DM geschickt.', ephemeral: true });
+
+      /* ---------- Claim-Log ---------- */
+      if (logChannels.claim) {
+        const logCh = interaction.guild.channels.cache.get(logChannels.claim);
+        if (logCh?.isTextBased()) {
+          const logEmbed = new EmbedBuilder()
+            .setTitle('📥 Account geclaimt')
+            .addFields(
+              { name: 'User', value: `${interaction.user.tag} (${interaction.user.id})` },
+              { name: 'Service', value: service, inline: true },
+              { name: 'Username', value: acc.username || '—', inline: true },
+              { name: 'Zeitpunkt', value: `<t:${Math.floor(Date.now()/1000)}:f>`, inline: true }
+            )
+            .setColor(0x2F3136)
+            .setTimestamp();
+          logCh.send({ embeds: [logEmbed] }).catch(()=>{});
+        }
+      }
 
     } catch (err) {
       try { await pgClient.query('ROLLBACK'); } catch {}
