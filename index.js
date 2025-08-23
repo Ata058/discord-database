@@ -75,7 +75,7 @@ const setLogsCmd = new SlashCommandBuilder()
   )
   .setDefaultMemberPermissions(PermissionFlagsBits.Administrator);
 
-/* NEW: /claim */
+/* NEW: /claim – jetzt nur für Admins */
 const claimCmd = new SlashCommandBuilder()
   .setName('claim')
   .setDescription('Hole einen Account und erhalte ihn per DM')
@@ -87,7 +87,9 @@ const claimCmd = new SlashCommandBuilder()
         { name: 'steam', value: 'steam' },
         { name: 'fivem', value: 'fivem' },
         { name: 'discord', value: 'discord' },
-      ));
+      )
+  )
+  .setDefaultMemberPermissions(PermissionFlagsBits.Administrator); // <— WICHTIG
 
 /* ---------- Ready ---------- */
 client.once('ready', async () => {
@@ -233,6 +235,14 @@ client.on('interactionCreate', async (interaction) => {
 
   /* /claim */
   if (interaction.commandName === 'claim') {
+    // **Runtime-Schutz**: Nur Admins
+    if (!interaction.memberPermissions?.has(PermissionFlagsBits.Administrator)) {
+      return interaction.reply({
+        content: '🚫 Du brauchst **Administrator**-Rechte, um diesen Befehl zu verwenden.',
+        ephemeral: true
+      });
+    }
+
     const service = interaction.options.getString('service'); // steam|fivem|discord
 
     // Check: DMs offen?
