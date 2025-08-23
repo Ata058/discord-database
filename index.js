@@ -394,4 +394,77 @@ client.on('interactionCreate', async (interaction) => {
 
       // Nächster freier Account dieses Services (Zeile sperren)
       const sel = await pgClient.query(
-        `SELECT id, username, password, email, email_p_
+        `SELECT id, username, password, email, email_pass
+           FROM accounts
+          WHERE is_used = false AND service = $1
+          ORDER BY id ASC
+          LIMIT 1
+          FOR UPDATE SKIP LOCKED`,
+        [service]
+      );
+
+      if (sel.rows.length === 0) {
+        await pgClient.query('ROLLBACK');
+        return interaction.reply({ content: `❌ Keine verfügbaren **${service}**-Accounts.`, ephemeral: true });
+      }
+
+      const acc = sel.rows[0];
+
+      // Reservieren/markieren
+      await pgClient.query(
+        `UPDATE accounts
+            SET is_used = true,
+                claimed_by = $1,
+                claimed_at = NOW()
+          WHERE id = $2`,
+        [interaction.user.id, acc.id]
+      );
+
+      // DM senden
+      const embed = new EmbedBuilder()
+        .setTitle(`✅ Dein ${service}-Account`)
+        .addFields(
+          { name: 'Username', value: acc.username || '—', inline: true },
+          { name: 'Passwort', value: acc.password || '—', inline: true },
+          ...(acc.email ? [{ name: 'E-Mail', value: acc.email, inline: true }] : []),
+          ...(acc.email_pass ? [{ name: 'E-Mail-Passwort', value: acc.email_pass, inline: true }] : []),
+        )
+        .setColor(0x57F287)
+        .setTimestamp();
+
+      await interaction.user.send({ embeds: [embed] });
+
+      await pgClient.query('COMMIT');
+      await interaction.reply({ content: '📬 Ich habe dir den Account per DM geschickt.', ephemeral: true });
+
+      // Claim loggen (optional)
+      if (logChannels.claim) {
+        const logCh = interaction.guild.channels.cache.get(logChannels.claim);
+        if (logCh?.isTextBased()) {
+          const logEmbed = new EmbedBuilder()
+            .setTitle('📥 Account geclaimt')
+            .addFields(
+              { name: 'User', value: `${interaction.user.tag} (${interaction.user.id})` },
+              { name: 'Service', value: service, inline: true },
+              { name: 'Username', value: acc.username || '—', inline: true },
+              { name: 'Zeitpunkt', value: `<t:${Math.floor(Date.now()/1000)}:f>`, inline: true }
+            )
+            .setColor(0x2F3136)
+            .setTimestamp();
+          logCh.send({ embeds: [logEmbed] }).catch(()=>{});
+        }
+      }
+
+      // Bestandsboard aktualisieren (ohne Ping)
+      await updateStockMessage(interaction.guild);
+
+    } catch (err) {
+      try { await pgClient.query('ROLLBACK'); } catch {}
+      return interaction.reply({ content: `❌ Fehler beim Claim: ${err.message}`, ephemeral: true });
+    } finally {
+      pgClient.release();
+    }
+  }
+});
+
+client.login(process.env.TOKEN);
