@@ -77,10 +77,10 @@ const setLogsCmd = new SlashCommandBuilder()
   )
   .setDefaultMemberPermissions(PermissionFlagsBits.Administrator);
 
-/* /claim – nur für Admins */
+/* /claim – nur für Admins, optional mehrere */
 const claimCmd = new SlashCommandBuilder()
   .setName('claim')
-  .setDescription('Hole einen Account und erhalte ihn per DM')
+  .setDescription('Hole einen oder mehrere Accounts und erhalte sie per DM')
   .addStringOption(opt =>
     opt.setName('service')
       .setDescription('Account-Typ')
@@ -90,6 +90,13 @@ const claimCmd = new SlashCommandBuilder()
         { name: 'fivem', value: 'fivem' },
         { name: 'discord', value: 'discord' },
       )
+  )
+  .addIntegerOption(opt =>
+    opt.setName('count')
+      .setDescription('Wie viele? (Standard 1, max. 10)')
+      .setRequired(false)
+      .setMinValue(1)
+      .setMaxValue(10)
   )
   .setDefaultMemberPermissions(PermissionFlagsBits.Administrator);
 
@@ -282,9 +289,8 @@ async function updateStockMessage(guild, { ping = false, pingText = '' } = {}) {
   const embed = buildStockEmbed(counts);
 
   // Versuche, vorhandene Nachricht zu editieren – wenn weg, neu erstellen
-  let msg = null;
   try {
-    msg = await channel.messages.fetch(message_id);
+    const msg = await channel.messages.fetch(message_id);
     await msg.edit({ embeds: [embed] });
   } catch {
     const newMsg = await channel.send({ embeds: [embed] });
@@ -383,6 +389,9 @@ client.on('interactionCreate', async (interaction) => {
     }
 
     const service = interaction.options.getString('service'); // steam|fivem|discord
+    const count = interaction.options.getInteger('count') || 1;
+    const MAX_PER_CALL = 10;
+    const wanted = Math.min(Math.max(count, 1), MAX_PER_CALL);
 
     // Check: DMs offen?
     try { await interaction.user.createDM(); }
@@ -392,15 +401,15 @@ client.on('interactionCreate', async (interaction) => {
     try {
       await pgClient.query('BEGIN');
 
-      // Nächster freier Account dieses Services (Zeile sperren)
+      // Nächste freien Accounts (Zeilen sperren)
       const sel = await pgClient.query(
         `SELECT id, username, password, email, email_pass
            FROM accounts
           WHERE is_used = false AND service = $1
           ORDER BY id ASC
-          LIMIT 1
+          LIMIT $2
           FOR UPDATE SKIP LOCKED`,
-        [service]
+        [service, wanted]
       );
 
       if (sel.rows.length === 0) {
@@ -408,45 +417,68 @@ client.on('interactionCreate', async (interaction) => {
         return interaction.reply({ content: `❌ Keine verfügbaren **${service}**-Accounts.`, ephemeral: true });
       }
 
-      const acc = sel.rows[0];
+      const accs = sel.rows;
+      const ids = accs.map(a => a.id);
 
-      // Reservieren/markieren
+      // Reservieren/markieren in einem Rutsch
       await pgClient.query(
         `UPDATE accounts
             SET is_used = true,
                 claimed_by = $1,
                 claimed_at = NOW()
-          WHERE id = $2`,
-        [interaction.user.id, acc.id]
+          WHERE id = ANY($2::int[])`,
+        [interaction.user.id, ids]
       );
 
-      // DM senden
-      const embed = new EmbedBuilder()
-        .setTitle(`✅ Dein ${service}-Account`)
-        .addFields(
-          { name: 'Username', value: acc.username || '—', inline: true },
-          { name: 'Passwort', value: acc.password || '—', inline: true },
-          ...(acc.email ? [{ name: 'E-Mail', value: acc.email, inline: true }] : []),
-          ...(acc.email_pass ? [{ name: 'E-Mail-Passwort', value: acc.email_pass, inline: true }] : []),
-        )
+      // DM bauen: Übersicht + Liste als Codeblock (kompakt, unter 2000 Zeichen)
+      const header = new EmbedBuilder()
+        .setTitle(`✅ Deine ${service}-Accounts`)
+        .setDescription(`Anzahl: **${accs.length}**`)
         .setColor(0x57F287)
         .setTimestamp();
 
-      await interaction.user.send({ embeds: [embed] });
+      const lines = accs.map((a, i) => {
+        const email = a.email || a.username || '—';
+        const epass = a.email_pass || a.password || '—';
+        return `${String(i+1).padStart(2,'0')}. ${a.username || '—'} | ${a.password || '—'}${a.email ? ` | ${email} | ${epass}` : ''}`;
+      });
+
+      // Aufteilen falls zu lang
+      const chunks = [];
+      let current = '```';
+      for (const line of lines) {
+        if ((current + '\n' + line + '```').length > 1900) { // safety
+          current += '```';
+          chunks.push(current);
+          current = '```' + line;
+        } else {
+          current += (current === '```' ? '' : '\n') + line;
+        }
+      }
+      current += '```';
+      chunks.push(current);
+
+      // Senden
+      await interaction.user.send({ embeds: [header] });
+      for (const c of chunks) {
+        await interaction.user.send({ content: c });
+      }
 
       await pgClient.query('COMMIT');
-      await interaction.reply({ content: '📬 Ich habe dir den Account per DM geschickt.', ephemeral: true });
+      await interaction.reply({ content: `📬 Ich habe dir **${accs.length}** ${service}-Account(s) per DM geschickt.`, ephemeral: true });
 
       // Claim loggen (optional)
       if (logChannels.claim) {
         const logCh = interaction.guild.channels.cache.get(logChannels.claim);
         if (logCh?.isTextBased()) {
+          const preview = accs.slice(0, 3).map(a => a.username).filter(Boolean).join(', ') || '—';
           const logEmbed = new EmbedBuilder()
-            .setTitle('📥 Account geclaimt')
+            .setTitle('📥 Accounts geclaimt')
             .addFields(
               { name: 'User', value: `${interaction.user.tag} (${interaction.user.id})` },
               { name: 'Service', value: service, inline: true },
-              { name: 'Username', value: acc.username || '—', inline: true },
+              { name: 'Anzahl', value: String(accs.length), inline: true },
+              { name: 'Erste(n) Username(s)', value: preview, inline: false },
               { name: 'Zeitpunkt', value: `<t:${Math.floor(Date.now()/1000)}:f>`, inline: true }
             )
             .setColor(0x2F3136)
