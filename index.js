@@ -93,10 +93,10 @@ const claimCmd = new SlashCommandBuilder()
   )
   .addIntegerOption(opt =>
     opt.setName('count')
-      .setDescription('Wie viele? (Standard 1, max. 10)')
+      .setDescription('Wie viele? (Standard 1, max. 50)')
       .setRequired(false)
       .setMinValue(1)
-      .setMaxValue(10)
+      .setMaxValue(50)
   )
   .setDefaultMemberPermissions(PermissionFlagsBits.Administrator);
 
