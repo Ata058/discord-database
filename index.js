@@ -390,7 +390,7 @@ client.on('interactionCreate', async (interaction) => {
 
     const service = interaction.options.getString('service'); // steam|fivem|discord
     const count = interaction.options.getInteger('count') || 1;
-    const MAX_PER_CALL = 10;
+    const MAX_PER_CALL = 50;
     const wanted = Math.min(Math.max(count, 1), MAX_PER_CALL);
 
     // Check: DMs offen?
