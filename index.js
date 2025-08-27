@@ -12,6 +12,9 @@ const {
 } = require('discord.js');
 const { Pool } = require('pg');
 
+/* ---------- Konstante: erlaubte Guild ---------- */
+const ALLOWED_GUILD_ID = '1405633884598829227';
+
 /* ---------- Postgres ---------- */
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
@@ -350,6 +353,11 @@ client.on('interactionCreate', async (interaction) => {
 
   /* /setstock */
   if (interaction.commandName === 'setstock') {
+    // ✅ Guild-Check
+    if (interaction.guild?.id !== ALLOWED_GUILD_ID) {
+      return interaction.reply({ content: '🚫 Dieser Command ist nur im autorisierten Server erlaubt.', ephemeral: true });
+    }
+
     const channel = interaction.options.getChannel('channel');
     if (!channel?.isTextBased()) {
       return interaction.reply({ content: '❌ Bitte einen Text-Channel angeben.', ephemeral: true });
@@ -358,7 +366,6 @@ client.on('interactionCreate', async (interaction) => {
     const counts = await getStockCounts();
     const embed = buildStockEmbed(counts);
 
-    // Sende (oder ersetze) die Board-Nachricht und speichere IDs
     const msg = await channel.send({ embeds: [embed] });
     await pool.query(
       `INSERT INTO guild_stock_message (guild_id, channel_id, message_id)
@@ -371,6 +378,11 @@ client.on('interactionCreate', async (interaction) => {
 
   /* /restock */
   if (interaction.commandName === 'restock') {
+    // ✅ Guild-Check
+    if (interaction.guild?.id !== ALLOWED_GUILD_ID) {
+      return interaction.reply({ content: '🚫 Dieser Command ist nur im autorisierten Server erlaubt.', ephemeral: true });
+    }
+
     const service = interaction.options.getString('service') || '';
     const note = interaction.options.getString('note') || '';
     const extra = [service && `**${service}**`, note && `— ${note}`].filter(Boolean).join(' ');
@@ -380,6 +392,11 @@ client.on('interactionCreate', async (interaction) => {
 
   /* /claim */
   if (interaction.commandName === 'claim') {
+    // ✅ Guild-Check
+    if (interaction.guild?.id !== ALLOWED_GUILD_ID) {
+      return interaction.reply({ content: '🚫 Dieser Command ist nur im autorisierten Server erlaubt.', ephemeral: true });
+    }
+
     // Nur Admins
     if (!interaction.memberPermissions?.has(PermissionFlagsBits.Administrator)) {
       return interaction.reply({
@@ -430,7 +447,7 @@ client.on('interactionCreate', async (interaction) => {
         [interaction.user.id, ids]
       );
 
-      // DM bauen: Übersicht + Liste als Codeblock (kompakt, unter 2000 Zeichen)
+      // DM bauen: Übersicht + Liste als Codeblock
       const header = new EmbedBuilder()
         .setTitle(`✅ Deine ${service}-Accounts`)
         .setDescription(`Anzahl: **${accs.length}**`)
@@ -443,11 +460,10 @@ client.on('interactionCreate', async (interaction) => {
         return `${String(i+1).padStart(2,'0')}. ${a.username || '—'} | ${a.password || '—'}${a.email ? ` | ${email} | ${epass}` : ''}`;
       });
 
-      // Aufteilen falls zu lang
       const chunks = [];
       let current = '```';
       for (const line of lines) {
-        if ((current + '\n' + line + '```').length > 1900) { // safety
+        if ((current + '\n' + line + '```').length > 1900) {
           current += '```';
           chunks.push(current);
           current = '```' + line;
@@ -458,7 +474,6 @@ client.on('interactionCreate', async (interaction) => {
       current += '```';
       chunks.push(current);
 
-      // Senden
       await interaction.user.send({ embeds: [header] });
       for (const c of chunks) {
         await interaction.user.send({ content: c });
