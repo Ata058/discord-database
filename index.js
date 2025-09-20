@@ -236,6 +236,23 @@ client.on('messageCreate', (message) => {
   }
 });
 
+/* ---------- Message-Listener: !pp ---------- */
+client.on('messageCreate', (message) => {
+  if (message.author.bot) return;
+  if (message.content.trim().toLowerCase() === '!webmail') {
+    message.reply(':link:・FiveM Ready webmail:
+
+https://30kbatch.com/
+
+:link:・Discord Webmail:
+
+https://rambler.ru/
+
+:link:・Steam Webmail:
+
+http://tb.dcmya.cn/');
+  }
+});
 /* ---------- Helpers: Stock ---------- */
 async function ensureStockTable() {
   await pool.query(`
