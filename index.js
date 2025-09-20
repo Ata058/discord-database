@@ -228,14 +228,6 @@ client.on('guildMemberUpdate', (oldMember, newMember) => {
   }
 });
 
-/* ---------- Message-Listener: !pp ---------- */
-client.on('messageCreate', (message) => {
-  if (message.author.bot) return;
-  if (message.content.trim().toLowerCase() === '!pp') {
-    message.reply('💳 our PayPal-Adress: **fliegerselling@gmail.com**');
-  }
-});
-
 /* ---------- Message-Listener ---------- */
 client.on('messageCreate', async (message) => {
   if (message.author.bot) return;
