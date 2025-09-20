@@ -236,20 +236,33 @@ client.on('messageCreate', (message) => {
   }
 });
 
-/* ---------- Message-Listener: !pp ---------- */
-if (message.content.trim().toLowerCase() === '!webmail') {
-  const embed = new EmbedBuilder()
-    .setTitle('🔗 Webmail Links')
-    .setDescription([
-      '• **FiveM Ready**: https://30kbatch.com/',
-      '• **Discord**: https://rambler.ru/',
-      '• **Steam**: http://tb.dcmya.cn/'
-    ].join('\n'))
-    .setColor(0x5865F2)
-    .setTimestamp();
-  message.reply({ embeds: [embed] });
+/* ---------- Message-Listener ---------- */
+client.on('messageCreate', async (message) => {
+  if (message.author.bot) return;
+
+  const content = message.content.trim().toLowerCase();
+
+  if (content === '!pp') {
+    await message.reply('💳 our PayPal-Adress: **fliegerselling@gmail.com**');
+    return;
+  }
+
+  if (content === '!webmail') {
+    const embed = new EmbedBuilder()
+      .setTitle('🔗 Webmail Links')
+      .setDescription([
+        '• **FiveM Ready**: https://30kbatch.com/',
+        '• **Discord**: https://rambler.ru/',
+        '• **Steam**: http://tb.dcmya.cn/'
+      ].join('\n'))
+      .setColor(0x5865F2)
+      .setTimestamp();
+
+    await message.reply({ embeds: [embed] });
+    return;
   }
 });
+
 
 /* ---------- Helpers: Stock ---------- */
 async function ensureStockTable() {
