@@ -237,22 +237,20 @@ client.on('messageCreate', (message) => {
 });
 
 /* ---------- Message-Listener: !pp ---------- */
-client.on('messageCreate', (message) => {
-  if (message.author.bot) return;
-  if (message.content.trim().toLowerCase() === '!webmail') {
-    message.reply(':link:・FiveM Ready webmail:
-
-https://30kbatch.com/
-
-:link:・Discord Webmail:
-
-https://rambler.ru/
-
-:link:・Steam Webmail:
-
-http://tb.dcmya.cn/');
+if (message.content.trim().toLowerCase() === '!webmail') {
+  const embed = new EmbedBuilder()
+    .setTitle('🔗 Webmail Links')
+    .setDescription([
+      '• **FiveM Ready**: https://30kbatch.com/',
+      '• **Discord**: https://rambler.ru/',
+      '• **Steam**: http://tb.dcmya.cn/'
+    ].join('\n'))
+    .setColor(0x5865F2)
+    .setTimestamp();
+  message.reply({ embeds: [embed] });
   }
 });
+
 /* ---------- Helpers: Stock ---------- */
 async function ensureStockTable() {
   await pool.query(`
