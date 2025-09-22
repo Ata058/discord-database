@@ -134,12 +134,18 @@ const restockCmd = new SlashCommandBuilder()
   )
   .setDefaultMemberPermissions(PermissionFlagsBits.Administrator);
 
+/* NEW: /leaderboard – zeigt Top User & Top Services nach Claims */
+const leaderboardCmd = new SlashCommandBuilder()
+  .setName('leaderboard')
+  .setDescription('Zeigt ein Leaderboard der geclaimten Accounts (Top User & Top Services)')
+  .setDefaultMemberPermissions(PermissionFlagsBits.Administrator);
+
 /* ---------- Ready ---------- */
 client.once('ready', async () => {
   console.log(`✅ Eingeloggt als ${client.user.tag}`);
   const rest = new REST({ version: '10' }).setToken(process.env.TOKEN);
   await rest.put(Routes.applicationCommands(client.application.id), {
-    body: [banIdCmd, setLogsCmd, claimCmd, setStockCmd, restockCmd],
+    body: [banIdCmd, setLogsCmd, claimCmd, setStockCmd, restockCmd, leaderboardCmd],
   });
   console.log('✅ Slash-Commands registriert');
 });
@@ -331,6 +337,45 @@ async function updateStockMessage(guild, { ping = false, pingText = '' } = {}) {
   }
 }
 
+/* ---------- Helper: Leaderboard ---------- */
+async function buildLeaderboardEmbed(guild) {
+  // Top User nach Claims
+  const { rows: topUsers } = await pool.query(`
+    SELECT claimed_by, COUNT(*)::int AS cnt
+      FROM accounts
+     WHERE is_used = true AND claimed_by IS NOT NULL
+     GROUP BY claimed_by
+     ORDER BY cnt DESC
+     LIMIT 10;
+  `);
+
+  // Top Services nach Claims
+  const { rows: topServices } = await pool.query(`
+    SELECT service, COUNT(*)::int AS cnt
+      FROM accounts
+     WHERE is_used = true
+     GROUP BY service
+     ORDER BY cnt DESC;
+  `);
+
+  const userLines = await Promise.all(topUsers.map(async (u, i) => {
+    const member = await guild.members.fetch(u.claimed_by).catch(()=>null);
+    const name = member ? member.user.tag : String(u.claimed_by);
+    return `**${i+1}.** ${name} — ${u.cnt}`;
+  }));
+
+  const serviceLines = topServices.map(s => `• ${s.service}: ${s.cnt}`);
+
+  return new EmbedBuilder()
+    .setTitle('🏆 Claim Leaderboard')
+    .addFields(
+      { name: 'Top User', value: userLines.join('\n') || '—' },
+      { name: 'Top Services', value: serviceLines.join('\n') || '—' }
+    )
+    .setColor(0xF1C40F)
+    .setTimestamp();
+}
+
 /* ---------- Interactions ---------- */
 client.on('interactionCreate', async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
@@ -368,7 +413,16 @@ client.on('interactionCreate', async (interaction) => {
       return interaction.reply({ content: '❌ Bitte einen Text-Channel auswählen.', ephemeral: true });
     }
     logChannels[typ] = channel.id;
-    return interaction.reply({ content: `✅ **${typ}**-Logs werden nun in ${channel} gesendet.`, ephemeral: true });
+    await interaction.reply({ content: `✅ **${typ}**-Logs werden nun in ${channel} gesendet.`, ephemeral: true });
+
+    // Wenn Claim-Log gesetzt wird, sofort Leaderboard posten
+    if (typ === 'claim') {
+      try {
+        const embed = await buildLeaderboardEmbed(interaction.guild);
+        await channel.send({ embeds: [embed] }).catch(()=>{});
+      } catch {}
+    }
+    return;
   }
 
   /* /setstock */
@@ -530,6 +584,29 @@ client.on('interactionCreate', async (interaction) => {
       return interaction.reply({ content: `❌ Fehler beim Claim: ${err.message}`, ephemeral: true });
     } finally {
       pgClient.release();
+    }
+  }
+
+  /* /leaderboard */
+  if (interaction.commandName === 'leaderboard') {
+    if (interaction.guild?.id !== ALLOWED_GUILD_ID) {
+      return interaction.reply({ content: '🚫 Dieser Command ist nur im autorisierten Server erlaubt.', ephemeral: true });
+    }
+    try {
+      const embed = await buildLeaderboardEmbed(interaction.guild);
+
+      // wenn Claim-Channel gesetzt, dort posten
+      const chId = logChannels.claim;
+      if (chId) {
+        const ch = await interaction.guild.channels.fetch(chId).catch(()=>null);
+        if (ch?.isTextBased()) {
+          await ch.send({ embeds: [embed] }).catch(()=>{});
+        }
+      }
+
+      return interaction.reply({ content: '✅ Leaderboard gesendet.', ephemeral: true });
+    } catch (err) {
+      return interaction.reply({ content: `❌ Fehler: ${err.message}`, ephemeral: true });
     }
   }
 });
