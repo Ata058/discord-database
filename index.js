@@ -14,6 +14,7 @@ const { Pool } = require('pg');
 
 /* ---------- Konstante: erlaubte Guild ---------- */
 const ALLOWED_GUILD_ID = '1405633884598829227';
+const SERVICES = ['steam','fivem','discord'];
 
 /* ---------- Postgres ---------- */
 const pool = new Pool({
@@ -41,6 +42,7 @@ const logChannels = {
   timeout: null,
   nickname: null,
   claim: null,
+  leaderboard: null, // NEU: separater Leaderboard-Channel
 };
 
 /* ---------------- Slash-Commands definieren ---------------- */
@@ -48,13 +50,9 @@ const banIdCmd = new SlashCommandBuilder()
   .setName('banid')
   .setDescription('Banne einen User per Discord-ID mit Grund')
   .addStringOption(opt =>
-    opt.setName('userid')
-      .setDescription('Die Discord-ID des Users')
-      .setRequired(true))
+    opt.setName('userid').setDescription('Die Discord-ID des Users').setRequired(true))
   .addStringOption(opt =>
-    opt.setName('grund')
-      .setDescription('Der Grund für den Bann')
-      .setRequired(true))
+    opt.setName('grund').setDescription('Der Grund für den Bann').setRequired(true))
   .setDefaultMemberPermissions(PermissionFlagsBits.BanMembers);
 
 const setLogsCmd = new SlashCommandBuilder()
@@ -71,6 +69,7 @@ const setLogsCmd = new SlashCommandBuilder()
         { name: 'timeout', value: 'timeout' },
         { name: 'nickname', value: 'nickname' },
         { name: 'claim', value: 'claim' },
+        { name: 'leaderboard', value: 'leaderboard' }, // NEU
       )
   )
   .addChannelOption(opt =>
@@ -103,14 +102,12 @@ const claimCmd = new SlashCommandBuilder()
   )
   .setDefaultMemberPermissions(PermissionFlagsBits.Administrator);
 
-/* NEW: /setstock – legt den Bestandskanal fest und erstellt/merkt die Nachricht */
+/* NEW: /setstock – Bestandskanal festlegen und merken */
 const setStockCmd = new SlashCommandBuilder()
   .setName('setstock')
-  .setDescription('Setzt den Kanal für das Bestands-Board (wird als eine Nachricht gehalten)')
+  .setDescription('Setzt den Kanal für das Bestands-Board (eine persistente Nachricht)')
   .addChannelOption(opt =>
-    opt.setName('channel')
-      .setDescription('Kanal für das Bestands-Board')
-      .setRequired(true)
+    opt.setName('channel').setDescription('Kanal für das Bestands-Board').setRequired(true)
   )
   .setDefaultMemberPermissions(PermissionFlagsBits.Administrator);
 
@@ -128,16 +125,14 @@ const restockCmd = new SlashCommandBuilder()
        { name: 'discord', value: 'discord' },
      ))
   .addStringOption(o =>
-    o.setName('note')
-     .setDescription('Zusätzliche Info (optional)')
-     .setRequired(false)
+    o.setName('note').setDescription('Zusätzliche Info (optional)').setRequired(false)
   )
   .setDefaultMemberPermissions(PermissionFlagsBits.Administrator);
 
-/* NEW: /leaderboard – zeigt Top User & Top Services nach Claims */
+/* NEW: /leaderboard – manuelles Refresh/Fallback */
 const leaderboardCmd = new SlashCommandBuilder()
   .setName('leaderboard')
-  .setDescription('Zeigt ein Leaderboard der geclaimten Accounts (Top User & Top Services)')
+  .setDescription('Aktualisiert das Leaderboard jetzt (Top User & Top Services)')
   .setDefaultMemberPermissions(PermissionFlagsBits.Administrator);
 
 /* ---------- Ready ---------- */
@@ -148,6 +143,15 @@ client.once('ready', async () => {
     body: [banIdCmd, setLogsCmd, claimCmd, setStockCmd, restockCmd, leaderboardCmd],
   });
   console.log('✅ Slash-Commands registriert');
+
+  // Tabellen sicherstellen
+  await ensureStockTable();
+  await ensureLeaderboardTable();
+
+  // Auto-Refresh-Timer fürs Leaderboard (alle 10 Minuten)
+  setInterval(async () => {
+    try { await refreshAllLeaderboards(); } catch {}
+  }, 10 * 60 * 1000);
 });
 
 /* ---------- Auto-Role beim Join + Join-Log ---------- */
@@ -274,8 +278,7 @@ async function ensureStockTable() {
 }
 
 async function getStockCounts() {
-  const services = ['steam','fivem','discord'];
-  const base = Object.fromEntries(services.map(s => [s, 0]));
+  const base = Object.fromEntries(SERVICES.map(s => [s, 0]));
   const { rows } = await pool.query(
     `SELECT service, COUNT(*)::int AS free
        FROM accounts
@@ -283,7 +286,7 @@ async function getStockCounts() {
       GROUP BY service;`
   );
   for (const r of rows) if (base[r.service] !== undefined) base[r.service] = r.free;
-  base.total = services.reduce((a,s)=>a+base[s],0);
+  base.total = SERVICES.reduce((a,s)=>a+base[s],0);
   return base;
 }
 
@@ -303,7 +306,6 @@ function buildStockEmbed(counts) {
 
 async function updateStockMessage(guild, { ping = false, pingText = '' } = {}) {
   await ensureStockTable();
-
   const { rows } = await pool.query(
     'SELECT channel_id, message_id FROM guild_stock_message WHERE guild_id = $1',
     [guild.id]
@@ -317,7 +319,6 @@ async function updateStockMessage(guild, { ping = false, pingText = '' } = {}) {
   const counts = await getStockCounts();
   const embed = buildStockEmbed(counts);
 
-  // Versuche, vorhandene Nachricht zu editieren – wenn weg, neu erstellen
   try {
     const msg = await channel.messages.fetch(message_id);
     await msg.edit({ embeds: [embed] });
@@ -337,9 +338,19 @@ async function updateStockMessage(guild, { ping = false, pingText = '' } = {}) {
   }
 }
 
-/* ---------- Helper: Leaderboard ---------- */
+/* ---------- Leaderboard: Tabellen & Helpers ---------- */
+async function ensureLeaderboardTable() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS guild_leaderboard_message (
+      guild_id    BIGINT PRIMARY KEY,
+      channel_id  BIGINT NOT NULL,
+      message_id  BIGINT NOT NULL
+    );
+  `);
+}
+
 async function buildLeaderboardEmbed(guild) {
-  // Top User nach Claims
+  // Top User nach Claims (kann leer sein)
   const { rows: topUsers } = await pool.query(`
     SELECT claimed_by, COUNT(*)::int AS cnt
       FROM accounts
@@ -349,31 +360,98 @@ async function buildLeaderboardEmbed(guild) {
      LIMIT 10;
   `);
 
-  // Top Services nach Claims
-  const { rows: topServices } = await pool.query(`
-    SELECT service, COUNT(*)::int AS cnt
-      FROM accounts
-     WHERE is_used = true
-     GROUP BY service
-     ORDER BY cnt DESC;
+  // Services inkl. Null-Werten erzwingen
+  const { rows: svcCounts } = await pool.query(`
+    WITH counts AS (
+      SELECT service, COUNT(*)::int AS cnt
+        FROM accounts
+       WHERE is_used = true
+       GROUP BY service
+    )
+    SELECT s.service, COALESCE(c.cnt, 0)::int AS cnt
+      FROM (VALUES ('steam'),('fivem'),('discord')) AS s(service)
+      LEFT JOIN counts c USING (service)
+      ORDER BY cnt DESC, service ASC;
   `);
 
-  const userLines = await Promise.all(topUsers.map(async (u, i) => {
+  const userLines = await Promise.all((topUsers || []).map(async (u, i) => {
     const member = await guild.members.fetch(u.claimed_by).catch(()=>null);
     const name = member ? member.user.tag : String(u.claimed_by);
     return `**${i+1}.** ${name} — ${u.cnt}`;
   }));
 
-  const serviceLines = topServices.map(s => `• ${s.service}: ${s.cnt}`);
+  const serviceLines = (svcCounts || []).map(s => `• ${s.service}: ${s.cnt}`);
+  const hasAnyClaims = (topUsers?.length ?? 0) > 0 || (svcCounts?.some(s => s.cnt > 0));
 
   return new EmbedBuilder()
     .setTitle('🏆 Claim Leaderboard')
+    .setDescription(hasAnyClaims ? null : 'Noch keine Claims. Chillig.')
     .addFields(
-      { name: 'Top User', value: userLines.join('\n') || '—' },
-      { name: 'Top Services', value: serviceLines.join('\n') || '—' }
+      { name: 'Top User', value: userLines.length ? userLines.join('\n') : '— keine Claims bisher —' },
+      { name: 'Top Services', value: serviceLines.length ? serviceLines.join('\n') : SERVICES.map(s => `• ${s}: 0`).join('\n') }
     )
     .setColor(0xF1C40F)
     .setTimestamp();
+}
+
+async function setLeaderboardMessage(guild, channelId) {
+  await ensureLeaderboardTable();
+  const channel = await guild.channels.fetch(channelId).catch(()=>null);
+  if (!channel?.isTextBased()) return;
+
+  const embed = await buildLeaderboardEmbed(guild);
+  const msg = await channel.send({ embeds: [embed] });
+  await pool.query(
+    `INSERT INTO guild_leaderboard_message (guild_id, channel_id, message_id)
+     VALUES ($1,$2,$3)
+     ON CONFLICT (guild_id) DO UPDATE
+       SET channel_id = EXCLUDED.channel_id,
+           message_id = EXCLUDED.message_id`,
+    [guild.id, channel.id, msg.id]
+  );
+}
+
+async function updateLeaderboardMessage(guild) {
+  await ensureLeaderboardTable();
+  const { rows } = await pool.query(
+    'SELECT channel_id, message_id FROM guild_leaderboard_message WHERE guild_id = $1',
+    [guild.id]
+  );
+  if (rows.length === 0) return; // nicht konfiguriert
+
+  const { channel_id, message_id } = rows[0];
+  const channel = await guild.channels.fetch(channel_id).catch(()=>null);
+  if (!channel?.isTextBased()) return;
+
+  const embed = await buildLeaderboardEmbed(guild);
+
+  try {
+    const msg = await channel.messages.fetch(message_id);
+    await msg.edit({ embeds: [embed] });
+  } catch {
+    // falls gelöscht: neu posten und upserten
+    const newMsg = await channel.send({ embeds: [embed] });
+    await pool.query(
+      `INSERT INTO guild_leaderboard_message (guild_id, channel_id, message_id)
+       VALUES ($1,$2,$3)
+       ON CONFLICT (guild_id) DO UPDATE
+         SET channel_id = EXCLUDED.channel_id,
+             message_id = EXCLUDED.message_id`,
+      [guild.id, channel.id, newMsg.id]
+    );
+  }
+}
+
+async function refreshAllLeaderboards() {
+  const { rows } = await pool.query(
+    'SELECT guild_id FROM guild_leaderboard_message'
+  );
+  for (const r of rows) {
+    const g = client.guilds.cache.get(String(r.guild_id)) || await client.guilds.fetch(String(r.guild_id)).catch(()=>null);
+    if (g) {
+      try { await updateLeaderboardMessage(g); } catch {}
+    }
+  }
 }
 
 /* ---------- Interactions ---------- */
@@ -415,23 +493,30 @@ client.on('interactionCreate', async (interaction) => {
     logChannels[typ] = channel.id;
     await interaction.reply({ content: `✅ **${typ}**-Logs werden nun in ${channel} gesendet.`, ephemeral: true });
 
-    // Wenn Claim-Log gesetzt wird, sofort Leaderboard posten
+    // Wenn Claim-Log gesetzt wird, optional ein einmaliges Leaderboard posten (nicht persistent)
     if (typ === 'claim') {
       try {
         const embed = await buildLeaderboardEmbed(interaction.guild);
         await channel.send({ embeds: [embed] }).catch(()=>{});
       } catch {}
     }
+
+    // Wenn Leaderboard-Channel gesetzt wird: persistente Nachricht anlegen/merken
+    if (typ === 'leaderboard') {
+      try {
+        await setLeaderboardMessage(interaction.guild, channel.id);
+      } catch (e) {
+        // still silent
+      }
+    }
     return;
   }
 
   /* /setstock */
   if (interaction.commandName === 'setstock') {
-    // ✅ Guild-Check
     if (interaction.guild?.id !== ALLOWED_GUILD_ID) {
       return interaction.reply({ content: '🚫 Dieser Command ist nur im autorisierten Server erlaubt.', ephemeral: true });
     }
-
     const channel = interaction.options.getChannel('channel');
     if (!channel?.isTextBased()) {
       return interaction.reply({ content: '❌ Bitte einen Text-Channel angeben.', ephemeral: true });
@@ -452,11 +537,9 @@ client.on('interactionCreate', async (interaction) => {
 
   /* /restock */
   if (interaction.commandName === 'restock') {
-    // ✅ Guild-Check
     if (interaction.guild?.id !== ALLOWED_GUILD_ID) {
       return interaction.reply({ content: '🚫 Dieser Command ist nur im autorisierten Server erlaubt.', ephemeral: true });
     }
-
     const service = interaction.options.getString('service') || '';
     const note = interaction.options.getString('note') || '';
     const extra = [service && `**${service}**`, note && `— ${note}`].filter(Boolean).join(' ');
@@ -466,17 +549,11 @@ client.on('interactionCreate', async (interaction) => {
 
   /* /claim */
   if (interaction.commandName === 'claim') {
-    // ✅ Guild-Check
     if (interaction.guild?.id !== ALLOWED_GUILD_ID) {
       return interaction.reply({ content: '🚫 Dieser Command ist nur im autorisierten Server erlaubt.', ephemeral: true });
     }
-
-    // Nur Admins
     if (!interaction.memberPermissions?.has(PermissionFlagsBits.Administrator)) {
-      return interaction.reply({
-        content: '🚫 Du brauchst **Administrator**-Rechte, um diesen Befehl zu verwenden.',
-        ephemeral: true
-      });
+      return interaction.reply({ content: '🚫 Du brauchst **Administrator**-Rechte, um diesen Befehl zu verwenden.', ephemeral: true });
     }
 
     const service = interaction.options.getString('service'); // steam|fivem|discord
@@ -511,7 +588,7 @@ client.on('interactionCreate', async (interaction) => {
       const accs = sel.rows;
       const ids = accs.map(a => a.id);
 
-      // Reservieren/markieren in einem Rutsch
+      // Reservieren/markieren
       await pgClient.query(
         `UPDATE accounts
             SET is_used = true,
@@ -521,7 +598,7 @@ client.on('interactionCreate', async (interaction) => {
         [interaction.user.id, ids]
       );
 
-      // DM bauen: Übersicht + Liste als Codeblock
+      // DM bauen
       const header = new EmbedBuilder()
         .setTitle(`✅ Deine ${service}-Accounts`)
         .setDescription(`Anzahl: **${accs.length}**`)
@@ -556,7 +633,7 @@ client.on('interactionCreate', async (interaction) => {
       await pgClient.query('COMMIT');
       await interaction.reply({ content: `📬 Ich habe dir **${accs.length}** ${service}-Account(s) per DM geschickt.`, ephemeral: true });
 
-      // Claim loggen (optional)
+      // Claim-Log
       if (logChannels.claim) {
         const logCh = interaction.guild.channels.cache.get(logChannels.claim);
         if (logCh?.isTextBased()) {
@@ -578,6 +655,8 @@ client.on('interactionCreate', async (interaction) => {
 
       // Bestandsboard aktualisieren (ohne Ping)
       await updateStockMessage(interaction.guild);
+      // Leaderboard direkt aktualisieren
+      await updateLeaderboardMessage(interaction.guild);
 
     } catch (err) {
       try { await pgClient.query('ROLLBACK'); } catch {}
@@ -587,24 +666,25 @@ client.on('interactionCreate', async (interaction) => {
     }
   }
 
-  /* /leaderboard */
+  /* /leaderboard – manuelles Refresh/Fallback */
   if (interaction.commandName === 'leaderboard') {
     if (interaction.guild?.id !== ALLOWED_GUILD_ID) {
       return interaction.reply({ content: '🚫 Dieser Command ist nur im autorisierten Server erlaubt.', ephemeral: true });
     }
     try {
-      const embed = await buildLeaderboardEmbed(interaction.guild);
-
-      // wenn Claim-Channel gesetzt, dort posten
-      const chId = logChannels.claim;
-      if (chId) {
-        const ch = await interaction.guild.channels.fetch(chId).catch(()=>null);
-        if (ch?.isTextBased()) {
-          await ch.send({ embeds: [embed] }).catch(()=>{});
-        }
+      // wenn persistente Nachricht konfiguriert ist, aktualisieren
+      const { rows } = await pool.query(
+        'SELECT channel_id FROM guild_leaderboard_message WHERE guild_id = $1',
+        [interaction.guild.id]
+      );
+      if (rows.length > 0) {
+        await updateLeaderboardMessage(interaction.guild);
+        return interaction.reply({ content: '✅ Leaderboard aktualisiert.', ephemeral: true });
+      } else {
+        // Fallback: direkt hier posten
+        const embed = await buildLeaderboardEmbed(interaction.guild);
+        return interaction.reply({ embeds: [embed] });
       }
-
-      return interaction.reply({ content: '✅ Leaderboard gesendet.', ephemeral: true });
     } catch (err) {
       return interaction.reply({ content: `❌ Fehler: ${err.message}`, ephemeral: true });
     }
