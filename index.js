@@ -139,7 +139,7 @@ const leaderboardCmd = new SlashCommandBuilder()
 client.once('ready', async () => {
   console.log(`✅ Eingeloggt als ${client.user.tag}`);
   const rest = new REST({ version: '10' }).setToken(process.env.TOKEN);
-  await rest.put(Routes.applicationCommands(client.application.id), {
+  await rest.put(Routes.applicationGuildCommands(client.application.id, ALLOWED_GUILD_ID), {
     body: [banIdCmd, setLogsCmd, claimCmd, setStockCmd, restockCmd, leaderboardCmd],
   });
   console.log('✅ Slash-Commands registriert');
