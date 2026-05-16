@@ -13,7 +13,7 @@ const {
 const { Pool } = require('pg');
 
 /* ---------- Konstante: erlaubte Guild ---------- */
-const ALLOWED_GUILD_ID = '1405633884598829227';
+const ALLOWED_GUILD_ID = '1505298556888547338';
 const SERVICES = ['steam','fivem','discord'];
 
 /* ---------- Postgres ---------- */
